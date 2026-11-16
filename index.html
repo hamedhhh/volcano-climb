@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Volcano Climb</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #0d070f; color: #fff;
+    font-family: "Trebuchet MS", Verdana, sans-serif;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+  }
+  #stage {
+    position: absolute; left: 50%; top: 50%;
+    width: 480px; height: 720px;
+    transform-origin: center center;
+    box-shadow: 0 0 60px rgba(255, 90, 30, .25);
+    overflow: hidden;
+  }
+  canvas { display: block; width: 480px; height: 720px; }
+  #overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; padding: 28px; box-sizing: border-box; text-align: center;
+    background: rgba(14, 7, 16, .8);
+  }
+  #overlay.hidden { display: none; }
+  #ovTitle { margin: 0; font-size: 40px; color: #ffb347; text-shadow: 0 3px 0 #7a1d06, 0 0 24px rgba(255, 110, 30, .6); }
+  #ovText { margin: 0; font-size: 17px; line-height: 1.5; color: #f3e6da; max-width: 400px; }
+  #ovText b { color: #ffd166; }
+  #ovLevels { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; width: 100%; max-width: 420px; }
+  #ovLevels.hidden, #ovBtn2.hidden { display: none; }
+  button {
+    font: inherit; color: #fff; cursor: pointer; border: 0; border-radius: 10px;
+    background: #e8501c; box-shadow: 0 4px 0 #8a2706;
+  }
+  button:active { transform: translateY(2px); box-shadow: 0 2px 0 #8a2706; }
+  #ovBtn { font-size: 22px; font-weight: bold; padding: 12px 34px; }
+  #ovBtn2 { font-size: 15px; padding: 8px 20px; background: #4a3540; box-shadow: 0 4px 0 #261a20; }
+  .lvl { padding: 8px 2px; font-size: 20px; font-weight: bold; background: #a8421c; }
+  .lvl small { display: block; font-size: 10px; font-weight: normal; opacity: .9; margin-top: 2px; }
+  .lvl:disabled { background: #3a2c30; box-shadow: 0 4px 0 #1e1618; color: #8a7a7e; cursor: default; }
+  #ovHint { font-size: 13px; color: #b9a6a0; }
+  #touch { position: absolute; left: 0; right: 0; bottom: 10px; display: none; justify-content: space-between; padding: 0 12px; pointer-events: none; }
+  #touch button {
+    pointer-events: auto; width: 74px; height: 74px; font-size: 30px; border-radius: 50%;
+    background: rgba(255, 255, 255, .16); box-shadow: none; border: 2px solid rgba(255, 255, 255, .35);
+  }
+  #touch .grp { display: flex; gap: 12px; }
+  @media (pointer: coarse) { #touch { display: flex; } }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game"></canvas>
+  <div id="touch">
+    <div class="grp"><button id="tLeft">◀</button><button id="tRight">▶</button></div>
+    <div class="grp"><button id="tJump">▲</button></div>
+  </div>
+  <div id="overlay">
+    <h1 id="ovTitle"></h1>
+    <p id="ovText"></p>
+    <div id="ovLevels"></div>
+    <button id="ovBtn"></button>
+    <button id="ovBtn2">Level menu</button>
+    <div id="ovHint"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+"use strict";
+// ---------------------------------------------------------------------------
+//  LEVELS — add a new line to add a new level.
+//    height     : how tall the volcano is (pixels to climb)
+//    stoneRate  : seconds between fire stones (smaller = more stones)
+//    stoneSpeed : how fast the stones fall (1 = normal)
+//    gapY       : vertical distance between ledges (keep below ~112)
+//    ledgeW     : average ledge width
+//    moving     : chance (0..1) that a ledge slides left and right
+// ---------------------------------------------------------------------------
+const LEVELS = [
+  { name: "Warm-up",     height: 1300, stoneRate: 1.30, stoneSpeed: 1.00, gapY: 90,  ledgeW: 150, moving: 0.0 },
+  { name: "Hot Steps",   height: 1600, stoneRate: 1.00, stoneSpeed: 1.15, gapY: 95,  ledgeW: 135, moving: 0.2 },
+  { name: "Ash Rain",    height: 1900, stoneRate: 0.80, stoneSpeed: 1.30, gapY: 100, ledgeW: 120, moving: 0.3 },
+  { name: "Lava Ladder", height: 2200, stoneRate: 0.65, stoneSpeed: 1.45, gapY: 105, ledgeW: 110, moving: 0.4 },
+  { name: "Inferno",     height: 2500, stoneRate: 0.50, stoneSpeed: 1.60, gapY: 108, ledgeW: 100, moving: 0.5 },
+];
+
+// ---- tuning ---------------------------------------------------------------
+const W = 480, H = 720;
+const TIME_LIMIT = 60;          // seconds before the volcano erupts
+const LIVES = 3;
+const GRAV = 1500, JUMP_V = 640, MOVE_V = 230;
+const PW = 22, PH = 30;         // player size
+const CR_L = 200, CR_R = 280, CR_DEPTH = 46;   // crater opening
+const SAVE_KEY = "volcanoClimbSave";
+
+// ---- setup ----------------------------------------------------------------
+const stage = document.getElementById("stage");
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const overlay = document.getElementById("overlay");
+const ovTitle = document.getElementById("ovTitle");
+const ovText = document.getElementById("ovText");
+const ovLevels = document.getElementById("ovLevels");
+const ovBtn = document.getElementById("ovBtn");
+const ovBtn2 = document.getElementById("ovBtn2");
+const ovHint = document.getElementById("ovHint");
+
+let dpr = 1;
+function fit() {
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+  stage.style.transform = "translate(-50%,-50%) scale(" + s + ")";
+  dpr = Math.max(1, Math.min(3, (window.devicePixelRatio || 1) * s));
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+}
+window.addEventListener("resize", fit);
+fit();
+
+let save = { unlocked: 1, best: [] };
+try {
+  const raw = JSON.parse(localStorage.getItem(SAVE_KEY));
+  if (raw && typeof raw.unlocked === "number") save = { unlocked: raw.unlocked, best: raw.best || [] };
+} catch (e) { /* no saved progress */ }
+save.unlocked = Math.max(1, Math.min(LEVELS.length, save.unlocked));
+function storeSave() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (e) {} }
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ---- game state -----------------------------------------------------------
+let state = "menu";   // menu | playing | paused | erupting | levelDone | gameOver | won
+let levelIdx = 0, L = LEVELS[0];
+let ledges = [], stones = [], particles = [];
+let top = 0, lever = null, volcanoOff = false;
+let timeLeft = TIME_LIMIT, lives = LIVES, lvT = 0, spawnT = 0;
+let camY = -(H - 60), shake = 0, eruptT = 0, clock = 0;
+let ovAction = null;
+const keys = { left: false, right: false };
+let jumpBuf = 0, coyote = 0;
+const player = { x: 0, y: 0, vx: 0, vy: 0, kx: 0, on: null, face: 1, inv: 0, walk: 0, above: false };
+
+function buildLevel(i) {
+  const lv = LEVELS[i], rnd = mulberry32(1000 + i * 77), topY = -lv.height;
+  const list = [{ x: -100, bx: -100, y: 0, w: W + 200, amp: 0, ground: true, dx: 0 }];
+  const lastY = topY + lv.gapY * 0.9;
+  const n = Math.max(2, Math.round(-lastY / (lv.gapY * 0.92)));
+  const sp = -lastY / n;
+  let cx = W / 2, prevMoving = false;
+  for (let k = 1; k < n; k++) {
+    const y = -sp * k + (rnd() - 0.5) * lv.gapY * 0.1;
+    const t = -y / lv.height;
+    const w = lv.ledgeW * (0.85 + rnd() * 0.3);
+    const moving = !prevMoving && k > 1 && rnd() < lv.moving;
+    const amp = moving ? 40 : 0;
+    const lo = Math.max(4, -80 + 120 * t) + w / 2 + amp, hi = W - lo;
+    let d = (70 + rnd() * 70) * (rnd() < 0.5 ? -1 : 1);
+    if (cx + d < lo || cx + d > hi) d = -d;
+    cx = Math.min(hi, Math.max(lo, cx + d));
+    list.push({ x: cx - w / 2, bx: cx - w / 2, y, w, amp, ph: rnd() * 6.28, sp: 1 + rnd() * 0.8, moving, dx: 0 });
+    prevMoving = moving;
+  }
+  // last ledge sits under one side of the rim; the lever is on the other side
+  const leftSide = cx < W / 2;
+  const fcx = leftSide ? 130 : 350;
+  list.push({ x: fcx - 65, bx: fcx - 65, y: lastY, w: 130, amp: 0, dx: 0 });
+  list.push({ x: 60, bx: 60, y: topY, w: CR_L - 60, amp: 0, rim: true, dx: 0 });
+  list.push({ x: CR_R, bx: CR_R, y: topY, w: W - 60 - CR_R, amp: 0, rim: true, dx: 0 });
+  return { ledges: list, top: topY, lever: { x: leftSide ? 385 : 95, y: topY } };
+}
+
+function startLevel(i) {
+  levelIdx = i; L = LEVELS[i];
+  const b = buildLevel(i);
+  ledges = b.ledges; top = b.top; lever = b.lever;
+  stones = []; particles = [];
+  volcanoOff = false; timeLeft = TIME_LIMIT; lives = LIVES; lvT = 0; spawnT = 1.0;
+  shake = 0; eruptT = 0; jumpBuf = 0; coyote = 0;
+  Object.assign(player, { x: W / 2 - PW / 2, y: -PH, vx: 0, vy: 0, kx: 0, on: ledges[0], face: 1, inv: 0, walk: 0, above: false });
+  camY = -(H - 60);
+  state = "playing";
+  overlay.classList.add("hidden");
+}
+
+// ---- overlays -------------------------------------------------------------
+function showOverlay(o) {
+  ovTitle.textContent = o.title;
+  ovText.innerHTML = o.text;
+  ovBtn.textContent = o.btn;
+  ovAction = o.action;
+  ovHint.textContent = o.hint || "";
+  ovBtn2.classList.toggle("hidden", !o.menuBtn);
+  ovLevels.classList.toggle("hidden", !o.levels);
+  if (o.levels) {
+    ovLevels.innerHTML = "";
+    LEVELS.forEach((lv, i) => {
+      const b = document.createElement("button");
+      b.className = "lvl";
+      const open = i < save.unlocked;
+      b.disabled = !open;
+      b.innerHTML = (open ? (i + 1) : "🔒") + "<small>" + (save.best[i] ? "★ " + save.best[i] : lv.name) + "</small>";
+      b.title = lv.name + (save.best[i] ? " — best score " + save.best[i] : "");
+      b.addEventListener("click", () => startLevel(i));
+      ovLevels.appendChild(b);
+    });
+  }
+  overlay.classList.remove("hidden");
+}
+
+function showMenu() {
+  state = "menu";
+  const next = Math.min(save.unlocked, LEVELS.length) - 1;
+  showOverlay({
+    title: "🌋 Volcano Climb",
+    text: "Climb the volcano, dodge the <b>fire stones</b>, pull the <b>lever</b> at the top to turn the volcano off, then <b>jump into the crater</b>.<br>You have <b>" + TIME_LIMIT + " seconds</b> before it erupts!",
+    btn: "Play level " + (next + 1),
+    action: () => startLevel(next),
+    levels: true,
+    hint: "Move: ← → or A D   ·   Jump: ↑ / W / Space   ·   Pause: P",
+  });
+}
+
+function gameOver(reason) {
+  state = "gameOver";
+  showOverlay({
+    title: "Game Over",
+    text: reason,
+    btn: "Try again",
+    action: () => startLevel(levelIdx),
+    menuBtn: true,
+    hint: "Level " + (levelIdx + 1) + " · " + L.name,
+  });
+}
+
+function levelComplete() {
+  const score = Math.ceil(timeLeft) * 10 + lives * 100;
+  const isBest = !save.best[levelIdx] || score > save.best[levelIdx];
+  if (isBest) save.best[levelIdx] = score;
+  const last = levelIdx === LEVELS.length - 1;
+  if (!last) save.unlocked = Math.max(save.unlocked, levelIdx + 2);
+  storeSave();
+  const stats = "Time left: <b>" + Math.ceil(timeLeft) + " s</b> · Lives: <b>" + lives + "</b><br>Score: <b>" + score + "</b>" + (isBest ? " — new best!" : "");
+  if (last) {
+    state = "won";
+    showOverlay({
+      title: "You did it! 🏆",
+      text: "Every volcano is cold and quiet.<br>" + stats,
+      btn: "Back to menu",
+      action: showMenu,
+      hint: "Tip: add your own levels in the LEVELS table at the top of the file.",
+    });
+  } else {
+    state = "levelDone";
+    showOverlay({
+      title: "Volcano is out!",
+      text: "Level " + (levelIdx + 1) + " complete.<br>" + stats,
+      btn: "Next level",
+      action: () => startLevel(levelIdx + 1),
+      menuBtn: true,
+      hint: "Next: " + LEVELS[levelIdx + 1].name,
+    });
+  }
+}
+
+function togglePause() {
+  if (state === "playing") {
+    state = "paused";
+    showOverlay({ title: "Paused", text: "Take a breath — the volcano waits.", btn: "Resume", action: togglePause, menuBtn: true });
+  } else if (state === "paused") {
+    state = "playing";
+    overlay.classList.add("hidden");
+  }
+}
+
+ovBtn.addEventListener("click", () => { if (ovAction) ovAction(); });
+ovBtn2.addEventListener("click", showMenu);
+
+// ---- input ----------------------------------------------------------------
+function pressJump() { jumpBuf = 0.13; }
+function releaseJump() { if (player.vy < 0) player.vy *= 0.5; }
+
+window.addEventListener("keydown", (e) => {
+  const k = e.key.toLowerCase();
+  if (["arrowleft", "arrowright", "arrowup", "arrowdown", " "].includes(k)) e.preventDefault();
+  if (state !== "playing") {
+    if (k === "p" && state === "paused") togglePause();
+    else if ((k === "enter" || k === " ") && !e.repeat && ovAction) ovAction();
+    return;
+  }
+  if (k === "arrowleft" || k === "a") keys.left = true;
+  else if (k === "arrowright" || k === "d") keys.right = true;
+  else if ((k === "arrowup" || k === "w" || k === " ") && !e.repeat) pressJump();
+  else if (k === "p" || k === "escape") togglePause();
+});
+window.addEventListener("keyup", (e) => {
+  const k = e.key.toLowerCase();
+  if (k === "arrowleft" || k === "a") keys.left = false;
+  else if (k === "arrowright" || k === "d") keys.right = false;
+  else if (k === "arrowup" || k === "w" || k === " ") releaseJump();
+});
+window.addEventListener("blur", () => { keys.left = keys.right = false; if (state === "playing") togglePause(); });
+
+function bindTouch(id, down, up) {
+  const el = document.getElementById(id);
+  el.addEventListener("pointerdown", (e) => { e.preventDefault(); down(); });
+  ["pointerup", "pointercancel", "pointerleave"].forEach((ev) => el.addEventListener(ev, (e) => { e.preventDefault(); up(); }));
+}
+bindTouch("tLeft", () => keys.left = true, () => keys.left = false);
+bindTouch("tRight", () => keys.right = true, () => keys.right = false);
+bindTouch("tJump", pressJump, releaseJump);
+
+// ---- update ---------------------------------------------------------------
+function puff(x, y, n, col, speed, life, r, g) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = speed * (0.3 + Math.random() * 0.7);
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life, max: life, r: r * (0.6 + Math.random() * 0.8), col, g: g || 0 });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const q = particles[i];
+    q.life -= dt;
+    if (q.life <= 0) { particles.splice(i, 1); continue; }
+    q.vy += q.g * dt; q.x += q.vx * dt; q.y += q.vy * dt;
+  }
+}
+
+function update(dt) {
+  lvT += dt;
+  const p = player;
+
+  // moving ledges
+  for (const l of ledges) {
+    if (!l.amp) continue;
+    const nx = l.bx + Math.sin(lvT * l.sp + l.ph) * l.amp;
+    l.dx = nx - l.x; l.x = nx;
+  }
+
+  // --- player ---
+  const ax = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+  if (ax) p.face = ax;
+  p.kx *= Math.pow(0.02, dt);
+  p.vx = ax * MOVE_V + p.kx;
+  if (p.on) { coyote = 0.1; if (p.on.amp) p.x += p.on.dx; } else coyote -= dt;
+  if (jumpBuf > 0) {
+    jumpBuf -= dt;
+    if (coyote > 0) {
+      p.vy = -JUMP_V; p.on = null; coyote = 0; jumpBuf = 0;
+      puff(p.x + PW / 2, p.y + PH, 4, "#cbb8a8", 50, 0.3, 3);
+    }
+  }
+  p.vy = Math.min(900, p.vy + GRAV * dt);
+  const prevBottom = p.y + PH;
+  p.x = Math.max(0, Math.min(W - PW, p.x + p.vx * dt));
+  p.y += p.vy * dt;
+  const wasOn = p.on;
+  p.on = null;
+  if (p.vy >= 0) {
+    for (const l of ledges) {
+      if (prevBottom <= l.y + 0.5 && p.y + PH >= l.y && p.x + PW > l.x && p.x < l.x + l.w) {
+        p.y = l.y - PH; p.vy = 0; p.on = l;
+        break;
+      }
+    }
+  }
+  if (p.on && !wasOn && coyote <= 0) puff(p.x + PW / 2, p.y + PH, 3, "#cbb8a8", 40, 0.25, 3);
+  if (p.on && ax) p.walk += dt * 14; else if (p.on) p.walk = 0;
+  if (p.inv > 0) p.inv -= dt;
+  if (p.y + PH <= top + 0.5) p.above = true;
+  if (p.on && !p.on.rim) p.above = false;
+
+  // lever
+  if (!volcanoOff && p.x + PW > lever.x - 12 && p.x < lever.x + 12 && p.y + PH > lever.y - 36 && p.y < lever.y) {
+    volcanoOff = true;
+    for (const s of stones) s.cold = true;
+    puff(W / 2, top + 10, 40, "#9a9a9a", 120, 1.2, 9, -60);
+    puff(lever.x, lever.y - 20, 12, "#7dff9a", 90, 0.5, 3);
+  }
+
+  // crater
+  const pcx = p.x + PW / 2;
+  if (p.above && !p.on && p.vy > 0 && pcx > CR_L + 3 && pcx < CR_R - 3 && p.y + PH > top + 14) {
+    if (volcanoOff) { levelComplete(); return; }
+    puff(pcx, top + 10, 30, "#ffb030", 220, 0.7, 6, 300);
+    gameOver("You jumped into the crater while the volcano was still burning.<br><b>Pull the lever first!</b>");
+    return;
+  }
+
+  // --- fire stones ---
+  if (!volcanoOff) {
+    spawnT -= dt;
+    if (spawnT <= 0) {
+      spawnT = L.stoneRate * (0.6 + Math.random() * 0.8);
+      let vx = (Math.random() * 2 - 1) * 175 * L.stoneSpeed;
+      if (Math.abs(vx) < 45) vx = vx < 0 ? -45 : 45;
+      stones.push({ x: W / 2 + (Math.random() - 0.5) * 40, y: top + 12, vx, vy: -(260 + Math.random() * 260), r: 7 + Math.random() * 4, b: 0, cold: false, tr: 0 });
+      puff(W / 2, top, 5, "#ffcf40", 120, 0.4, 4, 200);
+    }
+  }
+  const maxFall = 300 * L.stoneSpeed;
+  for (let i = stones.length - 1; i >= 0; i--) {
+    const s = stones[i];
+    s.vy = Math.min(maxFall, s.vy + 700 * dt);
+    const prevB = s.y + s.r;
+    s.x += s.vx * dt; s.y += s.vy * dt;
+    if (s.x < s.r) { s.x = s.r; s.vx = Math.abs(s.vx); }
+    if (s.x > W - s.r) { s.x = W - s.r; s.vx = -Math.abs(s.vx); }
+    let dead = false;
+    if (s.vy > 0) {
+      if (s.y > top + 12 && prevB < top + 12 && s.x > CR_L && s.x < CR_R) dead = true;   // fell back into the crater
+      else for (const l of ledges) {
+        if (prevB <= l.y + 0.5 && s.y + s.r >= l.y && s.x > l.x && s.x < l.x + l.w) {
+          if (l.ground || s.b >= 3) {
+            if (l.ground) { dead = true; puff(s.x, l.y, 8, s.cold ? "#777" : "#ff9a30", 140, 0.45, 4, 400); }
+          } else {
+            s.y = l.y - s.r; s.vy = -Math.max(170, s.vy * 0.55); s.b++;
+            puff(s.x, l.y, 4, s.cold ? "#777" : "#ffc040", 90, 0.3, 3, 300);
+          }
+          break;
+        }
+      }
+    }
+    if (!dead && !s.cold) {
+      s.tr -= dt;
+      if (s.tr <= 0) { s.tr = 0.04; particles.push({ x: s.x, y: s.y, vx: 0, vy: -20, life: 0.35, max: 0.35, r: s.r * 0.8, col: "#ff7a1a", g: 0 }); }
+      if (p.inv <= 0) {
+        const nx = Math.max(p.x, Math.min(s.x, p.x + PW)), ny = Math.max(p.y, Math.min(s.y, p.y + PH));
+        if ((s.x - nx) * (s.x - nx) + (s.y - ny) * (s.y - ny) < s.r * s.r) {
+          lives--; p.inv = 1.5; p.vy = -260; p.kx = (pcx < s.x ? -1 : 1) * 220; p.on = null; coyote = 0;
+          shake = 8; dead = true;
+          puff(s.x, s.y, 16, "#ffb030", 200, 0.5, 5, 300);
+          if (lives <= 0) { stones.splice(i, 1); gameOver("The fire stones got you.<br>Use the ledges above you as a shield!"); return; }
+        }
+      }
+    }
+    if (dead) stones.splice(i, 1);
+  }
+
+  updateParticles(dt);
+
+  // camera
+  const target = Math.max(top - 250, Math.min(-(H - 60), p.y - H * 0.55));
+  camY += (target - camY) * Math.min(1, dt * 6);
+  if (shake > 0) shake = Math.max(0, shake - dt * 20);
+
+  // timer
+  timeLeft -= dt;
+  if (timeLeft <= 0) { timeLeft = 0; state = "erupting"; eruptT = 0; }
+}
+
+function updateErupt(dt) {
+  eruptT += dt;
+  shake = 10;
+  for (let i = 0; i < 6; i++) {
+    particles.push({
+      x: W / 2 + (Math.random() - 0.5) * 70, y: top + 10,
+      vx: (Math.random() - 0.5) * 700, vy: -(300 + Math.random() * 700),
+      life: 1.4, max: 1.4, r: 8 + Math.random() * 14, col: Math.random() < 0.5 ? "#ffd23c" : "#ff5a1e", g: 900,
+    });
+  }
+  updateParticles(dt);
+  const target = Math.max(top - 250, Math.min(-(H - 60), top - H * 0.35));
+  camY += (target - camY) * Math.min(1, dt * 2.5);
+  if (eruptT > 2.8) { shake = 0; gameOver("Time is up — <b>the volcano erupted!</b><br>Reach the top faster next time."); }
+}
+
+// ---- drawing --------------------------------------------------------------
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+const STARS = (() => { const r = mulberry32(7), a = []; for (let i = 0; i < 50; i++) a.push([r() * W, r() * H, r() * 1.4 + 0.4, r() * 6]); return a; })();
+
+function drawSky() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#120a24"); g.addColorStop(0.55, "#3d1630"); g.addColorStop(1, "#b0461e");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#fff";
+  for (const s of STARS) {
+    const y = ((s[1] - camY * 0.08) % H + H) % H;
+    ctx.globalAlpha = 0.35 + 0.3 * Math.sin(clock * 2 + s[3]);
+    ctx.fillRect(s[0], y, s[2], s[2]);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawMountain() {
+  const g = ctx.createLinearGradient(0, top, 0, 0);
+  g.addColorStop(0, "#5c382a"); g.addColorStop(1, "#2a1917");
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(-60, 0); ctx.lineTo(60, top); ctx.lineTo(W - 60, top); ctx.lineTo(W + 60, 0);
+  ctx.closePath(); ctx.fill();
+  // rock layers
+  ctx.strokeStyle = "rgba(0,0,0,.2)"; ctx.lineWidth = 3;
+  for (let y = -70; y > top + 40; y -= 85) {
+    if (y < camY - 20 || y > camY + H + 20) continue;
+    const left = -60 + 120 * (-y / L.height);
+    ctx.beginPath(); ctx.moveTo(left + 14, y);
+    for (let x = left + 14; x < W - left - 14; x += 40) ctx.lineTo(x + 20, y + 6 * Math.sin(x * 0.05 + y));
+    ctx.stroke();
+  }
+  // crater
+  ctx.beginPath();
+  ctx.moveTo(CR_L, top); ctx.lineTo(CR_L + 12, top + CR_DEPTH); ctx.lineTo(CR_R - 12, top + CR_DEPTH); ctx.lineTo(CR_R, top);
+  ctx.closePath();
+  if (volcanoOff) ctx.fillStyle = "#150f12";
+  else {
+    const lg = ctx.createLinearGradient(0, top, 0, top + CR_DEPTH);
+    lg.addColorStop(0, "#ffe066"); lg.addColorStop(1, "#ff4a12");
+    ctx.fillStyle = lg;
+  }
+  ctx.fill();
+  if (!volcanoOff) {
+    const pulse = 0.45 + 0.15 * Math.sin(clock * 6) + (timeLeft < 10 ? 0.2 : 0);
+    const rg = ctx.createRadialGradient(W / 2, top, 5, W / 2, top, 170);
+    rg.addColorStop(0, "rgba(255,170,40," + pulse + ")"); rg.addColorStop(1, "rgba(255,90,20,0)");
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = rg; ctx.fillRect(W / 2 - 170, top - 170, 340, 340);
+    ctx.globalCompositeOperation = "source-over";
+  }
+  // ground
+  ctx.fillStyle = "#1c1113"; ctx.fillRect(-100, 0, W + 200, 500);
+  ctx.fillStyle = "#3a2420"; ctx.fillRect(-100, 0, W + 200, 5);
+}
+
+function drawLedges() {
+  for (const l of ledges) {
+    if (l.ground || l.y < camY - 30 || l.y > camY + H + 10) continue;
+    const h = l.rim ? 18 : 14;
+    ctx.fillStyle = "rgba(0,0,0,.3)"; rr(l.x + 3, l.y + 4, l.w, h, 5); ctx.fill();
+    ctx.fillStyle = l.moving ? "#6d4f73" : "#6e4b3a"; rr(l.x, l.y, l.w, h, 5); ctx.fill();
+    ctx.fillStyle = l.moving ? "#b792bd" : "#a67c60"; rr(l.x, l.y, l.w, 5, 3); ctx.fill();
+  }
+}
+
+function drawLever() {
+  const x = lever.x, y = lever.y, bob = Math.sin(clock * 5) * 4;
+  ctx.fillStyle = "#555a66"; rr(x - 13, y - 7, 26, 7, 2); ctx.fill();
+  const ang = volcanoOff ? 0.7 : -0.7;
+  const kx = x + Math.sin(ang) * 26, ky = y - 7 - Math.cos(ang) * 26;
+  ctx.strokeStyle = "#c9ced8"; ctx.lineWidth = 4; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(x, y - 7); ctx.lineTo(kx, ky); ctx.stroke();
+  ctx.fillStyle = volcanoOff ? "#4be07a" : "#ff3b30";
+  ctx.beginPath(); ctx.arc(kx, ky, 6, 0, 6.3); ctx.fill();
+  ctx.font = "bold 13px 'Trebuchet MS', sans-serif"; ctx.textAlign = "center";
+  if (!volcanoOff) {
+    ctx.fillStyle = "#fff"; ctx.fillText("LEVER", x, y - 58 + bob);
+    ctx.fillStyle = "#ffd166"; ctx.fillText("▼", x, y - 44 + bob);
+  } else {
+    ctx.fillStyle = "#7dff9a"; ctx.fillText("JUMP IN!", W / 2, top - 40 + bob);
+    ctx.fillText("▼", W / 2, top - 24 + bob);
+  }
+}
+
+function drawStones() {
+  for (const s of stones) {
+    if (s.y < camY - 30 || s.y > camY + H + 30) continue;
+    if (s.cold) ctx.fillStyle = "#5b5557";
+    else {
+      const g = ctx.createRadialGradient(s.x - 2, s.y - 2, 1, s.x, s.y, s.r);
+      g.addColorStop(0, "#fff6b0"); g.addColorStop(0.5, "#ff8a1e"); g.addColorStop(1, "#b3260a");
+      ctx.fillStyle = g;
+    }
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.3); ctx.fill();
+  }
+}
+
+function drawParticles() {
+  for (const q of particles) {
+    ctx.globalAlpha = Math.max(0, q.life / q.max);
+    ctx.fillStyle = q.col;
+    ctx.beginPath(); ctx.arc(q.x, q.y, q.r * (0.4 + 0.6 * q.life / q.max), 0, 6.3); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawPlayer() {
+  const p = player;
+  if (p.inv > 0 && Math.floor(p.inv * 12) % 2) return;
+  const x = p.x, y = p.y, f = p.face;
+  const sw = p.on ? Math.sin(p.walk) * 4 : 3;
+  ctx.fillStyle = "#2b3a67";                                   // legs
+  ctx.fillRect(x + 4 + sw * 0.5, y + 21, 6, 9);
+  ctx.fillRect(x + 12 - sw * 0.5, y + 21, 6, 9);
+  ctx.fillStyle = "#3fa7ff"; rr(x + 2, y + 11, 18, 13, 4); ctx.fill();   // body
+  ctx.fillStyle = "#ffd9b0"; ctx.beginPath(); ctx.arc(x + 11, y + 8, 7.5, 0, 6.3); ctx.fill();   // head
+  ctx.fillStyle = "#ffcc33"; ctx.beginPath(); ctx.arc(x + 11, y + 7, 8.5, Math.PI, 0); ctx.fill();   // helmet
+  ctx.fillRect(x + 2 + (f > 0 ? 8 : -2), y + 5.5, 12, 2.5);
+  ctx.fillStyle = "#222"; ctx.fillRect(x + 10 + f * 3.5, y + 8.5, 2.2, 2.6);   // eye
+}
+
+function drawHUD() {
+  ctx.fillStyle = "rgba(10,5,12,.6)"; ctx.fillRect(0, 0, W, 46);
+  ctx.textBaseline = "middle";
+  ctx.font = "bold 15px 'Trebuchet MS', sans-serif"; ctx.textAlign = "left"; ctx.fillStyle = "#f3e6da";
+  ctx.fillText("Lv " + (levelIdx + 1) + " · " + L.name, 12, 24);
+  const secs = Math.ceil(timeLeft), low = timeLeft < 10;
+  ctx.textAlign = "center";
+  ctx.font = "bold " + (low ? 28 + 3 * Math.sin(clock * 12) : 26) + "px 'Trebuchet MS', sans-serif";
+  ctx.fillStyle = low ? "#ff4a3a" : "#ffd166";
+  ctx.fillText("0:" + (secs < 10 ? "0" : "") + secs, W / 2, 24);
+  ctx.textAlign = "right"; ctx.font = "20px sans-serif";
+  for (let i = 0; i < LIVES; i++) { ctx.fillStyle = i < lives ? "#ff4d5e" : "#4a3a3e"; ctx.fillText("♥", W - 12 - i * 22, 25); }
+  // climb progress
+  const pr = Math.max(0, Math.min(1, -(player.y + PH) / L.height));
+  ctx.fillStyle = "rgba(255,255,255,.15)"; rr(W - 10, 60, 5, H - 150, 2); ctx.fill();
+  ctx.fillStyle = "#ffd166"; ctx.beginPath(); ctx.arc(W - 7.5, 60 + (H - 150) * (1 - pr), 5, 0, 6.3); ctx.fill();
+  // hints
+  let hint = "";
+  if (volcanoOff) hint = "Volcano is OFF — jump into the crater!";
+  else if (lvT < 4) hint = "Climb up and pull the lever at the top!";
+  if (hint && state === "playing") {
+    ctx.font = "bold 15px 'Trebuchet MS', sans-serif"; ctx.textAlign = "center";
+    const tw = ctx.measureText(hint).width + 24;
+    ctx.fillStyle = "rgba(10,5,12,.65)"; rr(W / 2 - tw / 2, 56, tw, 28, 8); ctx.fill();
+    ctx.fillStyle = volcanoOff ? "#7dff9a" : "#fff"; ctx.fillText(hint, W / 2, 71);
+  }
+  ctx.textBaseline = "alphabetic";
+  if (low && state === "playing") {
+    ctx.fillStyle = "rgba(255,40,10," + (0.08 + 0.07 * Math.sin(clock * 10)) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+function drawEruption() {
+  const a = Math.min(1, eruptT / 2.2);
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "rgba(255,220,80," + a + ")"); g.addColorStop(1, "rgba(255,60,10," + a * 0.9 + ")");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = "lighter";
+  for (let k = 0; k < 60; k++) {
+    const hx = Math.sin(k * 12.9898) * 43758.5453, hy = Math.sin(k * 78.233) * 12543.123;
+    const fx = (hx - Math.floor(hx)) * W, fy0 = hy - Math.floor(hy);
+    const fy = ((fy0 + eruptT * (0.5 + fy0)) % 1.2) * H - 60;
+    ctx.fillStyle = "rgba(255," + (120 + (k % 5) * 25) + ",20," + a * 0.35 + ")";
+    ctx.beginPath(); ctx.arc(fx + Math.sin(eruptT * 5 + k) * 15, fy, 25 + (k % 7) * 7, 0, 6.3); ctx.fill();
+  }
+  ctx.globalCompositeOperation = "source-over";
+}
+
+function draw() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawSky();
+  ctx.save();
+  const sx = shake ? (Math.random() - 0.5) * shake : 0, sy = shake ? (Math.random() - 0.5) * shake : 0;
+  ctx.translate(sx, -camY + sy);
+  drawMountain();
+  drawLedges();
+  drawLever();
+  drawParticles();
+  drawStones();
+  if (state !== "erupting" || eruptT < 1.2) drawPlayer();
+  ctx.restore();
+  if (state === "erupting") drawEruption();
+  if (state !== "menu") drawHUD();
+}
+
+// ---- main loop ------------------------------------------------------------
+let lastT = 0;
+function frame(t) {
+  const dt = Math.min(0.033, Math.max(0, (t - lastT) / 1000 || 0));
+  lastT = t; clock += dt;
+  if (state === "playing") update(dt);
+  else if (state === "erupting") updateErupt(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// show level 1 behind the menu
+(function init() {
+  const b = buildLevel(0);
+  ledges = b.ledges; top = b.top; lever = b.lever;
+  Object.assign(player, { x: W / 2 - PW / 2, y: -PH, on: ledges[0] });
+  showMenu();
+  requestAnimationFrame(frame);
+})();
+/*TEST_HOOK*/
+})();
+</script>
+</body>
+</html>
